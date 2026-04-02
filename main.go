@@ -27,6 +27,18 @@ func main() {
 	case "--version", "-v":
 		fmt.Println("whoisusing", version)
 		return
+	case "--all", "-a":
+		entries, err := listAllPorts()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			os.Exit(1)
+		}
+		if len(entries) == 0 {
+			fmt.Println("No listening ports found.")
+			return
+		}
+		printEntries(entries)
+		return
 	}
 
 	port, err := strconv.Atoi(args[0])
@@ -54,12 +66,14 @@ func printUsage() {
 
 Usage:
   whoisusing <port>       Show process using a specific port
+  whoisusing --all        List all listening ports
   whoisusing --help       Show this help
   whoisusing --version    Show version
 
 Examples:
   whoisusing 8080
-  whoisusing 3000`)
+  whoisusing 3000
+  whoisusing --all`)
 }
 
 // Entry holds info about a process using a port.
@@ -77,6 +91,17 @@ func findByPort(port int) ([]Entry, error) {
 		return findByPortWindows(port)
 	case "linux", "darwin":
 		return findByPortUnix(port)
+	default:
+		return nil, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+func listAllPorts() ([]Entry, error) {
+	switch runtime.GOOS {
+	case "windows":
+		return listAllPortsWindows()
+	case "linux", "darwin":
+		return listAllPortsUnix()
 	default:
 		return nil, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}
@@ -107,6 +132,22 @@ func findByPortWindows(port int) ([]Entry, error) {
 
 	entries = resolveProcessNames(entries)
 	return entries, nil
+}
+
+func listAllPortsWindows() ([]Entry, error) {
+	out, err := exec.Command("cmd", "/C", "netstat -ano -p TCP").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("netstat failed: %w", err)
+	}
+
+	udpOut, _ := exec.Command("cmd", "/C", "netstat -ano -p UDP").CombinedOutput()
+
+	var entries []Entry
+	entries = append(entries, parseNetstatWindows(string(out), "TCP", -1)...)
+	entries = append(entries, parseNetstatWindows(string(udpOut), "UDP", -1)...)
+
+	entries = resolveProcessNames(entries)
+	return dedup(entries), nil
 }
 
 func parseNetstatWindows(output, proto string, filterPort int) []Entry {
@@ -209,6 +250,17 @@ func findByPortUnix(port int) ([]Entry, error) {
 	return parseLsof(string(out)), nil
 }
 
+func listAllPortsUnix() ([]Entry, error) {
+	out, err := exec.Command("lsof", "-i", "-P", "-n", "-sTCP:LISTEN").CombinedOutput()
+	if err != nil {
+		if len(out) == 0 {
+			return nil, nil
+		}
+	}
+
+	return dedup(parseLsof(string(out))), nil
+}
+
 func parseLsof(output string) []Entry {
 	var entries []Entry
 	lines := strings.Split(output, "\n")
@@ -255,4 +307,17 @@ func extractPort(address string) int {
 		return -1
 	}
 	return p
+}
+
+func dedup(entries []Entry) []Entry {
+	seen := make(map[string]bool)
+	var result []Entry
+	for _, e := range entries {
+		key := fmt.Sprintf("%s:%d:%d", e.Proto, e.Port, e.PID)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, e)
+		}
+	}
+	return result
 }
