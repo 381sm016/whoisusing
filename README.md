@@ -1,8 +1,7 @@
 # whoisusing
 
-A tiny, fast CLI tool that tells you what process is using a port.
+I didn't like typing in `netstat -ano | find "8080"` lol so here is a GO based port finder.
 
-No dependencies. Single binary. Works on Windows, Linux, and macOS.
 
 ## Install
 
