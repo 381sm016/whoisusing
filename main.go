@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 )
 
@@ -118,40 +119,46 @@ func printEntries(entries []Entry) {
 
 // --- Windows ---
 
-func findByPortWindows(port int) ([]Entry, error) {
+func scanWindows(filterPort int) ([]Entry, error) {
+	type result struct {
+		entries []Entry
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	var entries []Entry
 
 	for _, proto := range []string{"TCP", "TCPv6", "UDP", "UDPv6"} {
-		out, err := exec.Command("cmd", "/C", "netstat -ano -p "+proto).CombinedOutput()
-		if err != nil {
-			continue
-		}
-		label := strings.TrimSuffix(proto, "v6")
-		entries = append(entries, parseNetstatWindows(string(out), label, port)...)
+		wg.Add(1)
+		go func(proto string) {
+			defer wg.Done()
+			out, err := exec.Command("cmd", "/C", "netstat -ano -p "+proto).CombinedOutput()
+			if err != nil {
+				return
+			}
+			label := strings.TrimSuffix(proto, "v6")
+			parsed := parseNetstatWindows(string(out), label, filterPort)
+			mu.Lock()
+			entries = append(entries, parsed...)
+			mu.Unlock()
+		}(proto)
 	}
+	wg.Wait()
 
 	if len(entries) == 0 {
 		return nil, nil
 	}
 
 	entries = resolveProcessNames(entries)
-	return entries, nil
+	return dedup(entries), nil
+}
+
+func findByPortWindows(port int) ([]Entry, error) {
+	return scanWindows(port)
 }
 
 func listAllPortsWindows() ([]Entry, error) {
-	var entries []Entry
-
-	for _, proto := range []string{"TCP", "TCPv6", "UDP", "UDPv6"} {
-		out, err := exec.Command("cmd", "/C", "netstat -ano -p "+proto).CombinedOutput()
-		if err != nil {
-			continue
-		}
-		label := strings.TrimSuffix(proto, "v6")
-		entries = append(entries, parseNetstatWindows(string(out), label, -1)...)
-	}
-
-	entries = resolveProcessNames(entries)
-	return dedup(entries), nil
+	return scanWindows(-1)
 }
 
 func parseNetstatWindows(output, proto string, filterPort int) []Entry {
@@ -203,9 +210,39 @@ func parseNetstatWindows(output, proto string, filterPort int) []Entry {
 }
 
 func resolveProcessNames(entries []Entry) []Entry {
+	if runtime.GOOS == "windows" {
+		return resolveWindows(entries)
+	}
+	return resolveUnix(entries)
+}
+
+func resolveWindows(entries []Entry) []Entry {
+	// One tasklist call for ALL processes, build a PID→name map
+	out, err := exec.Command("tasklist", "/FO", "CSV", "/NH").CombinedOutput()
+	if err != nil {
+		for i := range entries {
+			entries[i].Process = "(unknown)"
+		}
+		return entries
+	}
+
+	pidMap := make(map[int]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		parts := strings.Split(line, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		name := strings.Trim(parts[0], "\"")
+		pid, err := strconv.Atoi(strings.Trim(parts[1], "\""))
+		if err != nil {
+			continue
+		}
+		pidMap[pid] = name
+	}
+
 	for i, e := range entries {
-		name, err := getProcessName(e.PID)
-		if err == nil {
+		if name, ok := pidMap[e.PID]; ok {
 			entries[i].Process = name
 		} else {
 			entries[i].Process = "(unknown)"
@@ -214,30 +251,16 @@ func resolveProcessNames(entries []Entry) []Entry {
 	return entries
 }
 
-func getProcessName(pid int) (string, error) {
-	if runtime.GOOS == "windows" {
-		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").CombinedOutput()
+func resolveUnix(entries []Entry) []Entry {
+	for i, e := range entries {
+		out, err := exec.Command("ps", "-p", strconv.Itoa(e.PID), "-o", "comm=").CombinedOutput()
 		if err != nil {
-			return "", err
+			entries[i].Process = "(unknown)"
+		} else {
+			entries[i].Process = strings.TrimSpace(string(out))
 		}
-		line := strings.TrimSpace(string(out))
-		if strings.Contains(line, "No tasks") {
-			return "(exited)", nil
-		}
-		// CSV format: "name.exe","pid","session","session#","mem"
-		parts := strings.Split(line, ",")
-		if len(parts) >= 1 {
-			return strings.Trim(parts[0], "\""), nil
-		}
-		return "", fmt.Errorf("unexpected tasklist output")
 	}
-
-	// Unix: read /proc or use ps
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return entries
 }
 
 // --- Unix (Linux/macOS) ---
