@@ -119,32 +119,36 @@ func printEntries(entries []Entry) {
 // --- Windows ---
 
 func findByPortWindows(port int) ([]Entry, error) {
-	out, err := exec.Command("cmd", "/C", "netstat -ano -p TCP").CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("netstat failed: %w", err)
+	var entries []Entry
+
+	for _, proto := range []string{"TCP", "TCPv6", "UDP", "UDPv6"} {
+		out, err := exec.Command("cmd", "/C", "netstat -ano -p "+proto).CombinedOutput()
+		if err != nil {
+			continue
+		}
+		label := strings.TrimSuffix(proto, "v6")
+		entries = append(entries, parseNetstatWindows(string(out), label, port)...)
 	}
 
-	udpOut, _ := exec.Command("cmd", "/C", "netstat -ano -p UDP").CombinedOutput()
-
-	var entries []Entry
-	entries = append(entries, parseNetstatWindows(string(out), "TCP", port)...)
-	entries = append(entries, parseNetstatWindows(string(udpOut), "UDP", port)...)
+	if len(entries) == 0 {
+		return nil, nil
+	}
 
 	entries = resolveProcessNames(entries)
 	return entries, nil
 }
 
 func listAllPortsWindows() ([]Entry, error) {
-	out, err := exec.Command("cmd", "/C", "netstat -ano -p TCP").CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("netstat failed: %w", err)
-	}
-
-	udpOut, _ := exec.Command("cmd", "/C", "netstat -ano -p UDP").CombinedOutput()
-
 	var entries []Entry
-	entries = append(entries, parseNetstatWindows(string(out), "TCP", -1)...)
-	entries = append(entries, parseNetstatWindows(string(udpOut), "UDP", -1)...)
+
+	for _, proto := range []string{"TCP", "TCPv6", "UDP", "UDPv6"} {
+		out, err := exec.Command("cmd", "/C", "netstat -ano -p "+proto).CombinedOutput()
+		if err != nil {
+			continue
+		}
+		label := strings.TrimSuffix(proto, "v6")
+		entries = append(entries, parseNetstatWindows(string(out), label, -1)...)
+	}
 
 	entries = resolveProcessNames(entries)
 	return dedup(entries), nil
